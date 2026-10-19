@@ -1,0 +1,452 @@
+--!strict
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+if not RunService:IsClient() then return end
+
+local player = Players.LocalPlayer
+while not player do task.wait(); player = Players.LocalPlayer end
+local playerGui = player:WaitForChild("PlayerGui")
+
+local MESH_ID = 139025296710661
+local HEIGHT = 2.1
+local state = {speed = 30, delay = 1.5, noclip = false}
+
+local function root(): BasePart?
+	local c = player.Character
+	return c and (c:FindFirstChild("HumanoidRootPart") :: BasePart? or c.PrimaryPart)
+end
+local function humanoid(): Humanoid?
+	local c = player.Character
+	return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function setFlying(on: boolean)
+	local h = humanoid()
+	if h then h:ChangeState(on and Enum.HumanoidStateType.Physics or Enum.HumanoidStateType.GettingUp) end
+end
+
+local function meshId(inst: Instance): number?
+	local raw = (inst :: any).MeshId
+	if typeof(raw) ~= "string" or raw == "" then raw = tostring((inst :: any).MeshContent) end
+	local d = typeof(raw) == "string" and string.match(raw, "(%d+)") or nil
+	return d and tonumber(d) or nil
+end
+local function targetOf(inst: Instance): BasePart?
+	if inst:IsA("MeshPart") and meshId(inst) == MESH_ID then return inst end
+	if inst:IsA("SpecialMesh") and meshId(inst) == MESH_ID then
+		local p = inst.Parent
+		if p and p:IsA("BasePart") then return p end
+	end
+	return nil
+end
+
+local token, flying, flights = 0, false, 0
+local collide: {[BasePart]: boolean} = {}
+local hold: Vector3? = nil
+local safeY: number? = nil
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+
+local function setCollide(on: boolean)
+	local c = player.Character
+	if not c then table.clear(collide) return end
+	if on then
+		for p, old in pairs(collide) do
+			if p.Parent and not p.CanCollide then p.CanCollide = old end
+		end
+		table.clear(collide)
+		return
+	end
+	for _, p in ipairs(c:GetDescendants()) do
+		if p:IsA("BasePart") then
+			if collide[p] == nil then collide[p] = p.CanCollide end
+			p.CanCollide = false
+		end
+	end
+end
+local function floorGuard()
+	local r = root()
+	local c = player.Character
+	if not r or not c then return end
+	if hold and math.abs(r.Position.Y - hold.Y) <= 1.5 then return end
+	rayParams.FilterDescendantsInstances = {c}
+	local hit = workspace:Raycast(r.Position + Vector3.new(0, 3, 0), Vector3.new(0, -600, 0), rayParams)
+	local limit = hit and hit.Position.Y + 3 or safeY
+	if limit then
+		safeY = limit
+		if r.Position.Y < limit then
+			r.AssemblyLinearVelocity = Vector3.new(r.AssemblyLinearVelocity.X, 0, r.AssemblyLinearVelocity.Z)
+			r.CFrame += Vector3.new(0, limit - r.Position.Y, 0)
+		end
+	end
+end
+local function setNoclip(on: boolean)
+	state.noclip = on
+	if on then
+		local r = root()
+		safeY = r and r.Position.Y or nil
+		setCollide(false)
+		floorGuard()
+		if not flying then setFlying(false) end
+	else setCollide(true) end
+end
+
+local function goal(part: BasePart): Vector3
+	return part.Position - Vector3.new(0, part.Size.Y * 0.5 + HEIGHT, 0)
+end
+local function fly(r: BasePart, to: Vector3)
+	local yaw = select(2, r.CFrame:ToEulerAnglesYXZ())
+	local place = function(p: Vector3)
+		r.AssemblyLinearVelocity = Vector3.zero
+		r.AssemblyAngularVelocity = Vector3.zero
+		r.CFrame = CFrame.new(p) * CFrame.Angles(0, yaw, 0)
+	end
+	if state.speed <= 0 or (to - r.Position).Magnitude < 0.5 then
+		place(to)
+		hold = to
+		return
+	end
+	token += 1
+	local my = token
+	local h = humanoid()
+	local pos = r.Position
+	flying = true
+	flights += 1
+	setFlying(true)
+	setCollide(false)
+	while my == token and r.Parent do
+		local dt = RunService.Heartbeat:Wait()
+		local d = to - pos
+		local dist = d.Magnitude
+		if dist < 0.05 or state.speed * dt >= dist then
+			place(to)
+			hold = to
+			break
+		end
+		pos += d.Unit * state.speed * dt
+		place(pos)
+		if h and h.Parent then h:ChangeState(Enum.HumanoidStateType.Physics) end
+	end
+	flights -= 1
+	if flights <= 0 then
+		flights = 0
+		flying = false
+		setFlying(false)
+		if not state.noclip then setCollide(true) end
+	end
+end
+
+local targets: {BasePart} = {}
+local set: {[BasePart]: boolean} = {}
+local sorted: {BasePart} = {}
+local dirty, current, index = true, nil :: BasePart?, 0
+local auto = false
+local add = function(p: BasePart)
+	if set[p] then return false end
+	set[p] = true
+	targets[#targets + 1] = p
+	return true
+end
+local remove = function(p: BasePart)
+	if not set[p] then return false end
+	set[p] = nil
+	for i = #targets, 1, -1 do
+		if targets[i] == p then table.remove(targets, i) break end
+	end
+	return true
+end
+local function scan()
+	table.clear(set)
+	table.clear(targets)
+	for _, i in ipairs(workspace:GetDescendants()) do
+		local p = targetOf(i)
+		if p then add(p) end
+	end
+	dirty = true
+end
+local function refresh()
+	dirty = false
+	table.clear(sorted)
+	for i = 1, #targets do sorted[i] = targets[i] end
+	local r = root()
+	local o = r and r.Position or Vector3.zero
+	table.sort(sorted, function(a, b) return (a.Position - o).Magnitude < (b.Position - o).Magnitude end)
+	if current and set[current] then
+		for i = 1, #sorted do
+			if sorted[i] == current then index = i break end
+		end
+	else current, index = nil, 0 end
+end
+local goToIndex: (number) -> () = function(n)
+	if n < 1 or n > #sorted then return end
+	local p = sorted[n]
+	if not p or not p.Parent then dirty = true return end
+	current, index = p, n
+	local r = root()
+	if r then task.spawn(function()
+		fly(r, goal(p))
+		if current == p then
+			for i = 1, #sorted do
+				if sorted[i] == p then index = i break end
+			end
+		end
+	end) end
+end
+local goStep = function(step: number)
+	if #sorted == 0 then return end
+	local n = (index > 0 and index <= #sorted and index or 0) + step
+	if n > #sorted then n = 1 elseif n < 1 then n = #sorted end
+	goToIndex(n)
+end
+
+workspace.DescendantAdded:Connect(function(i)
+	local p = targetOf(i)
+	if p and add(p) then dirty = true end
+end)
+workspace.DescendantRemoving:Connect(function(i)
+	local p = targetOf(i)
+	if p and remove(p) then dirty = true end
+end)
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "MeshTeleportGui"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 100
+gui.Parent = playerGui
+
+local function corner(parent: Instance, r: UDim)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = r
+	c.Parent = parent
+	return c
+end
+local function label(parent: Instance, text: string, x: number, y: number, w: number, size: number, font: Enum.Font?)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.Size = UDim2.fromOffset(w, 22)
+	l.Position = UDim2.fromOffset(x, y)
+	l.Text = text
+	l.TextColor3 = Color3.new(1, 1, 1)
+	l.Font = font or Enum.Font.GothamBold
+	l.TextSize = size
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.Parent = parent
+	return l
+end
+
+local open = Instance.new("TextButton")
+open.Size = UDim2.fromOffset(64, 64)
+open.Position = UDim2.new(1, -100, 0.5, -32)
+open.BackgroundColor3 = Color3.fromRGB(48, 52, 58)
+open.Text = ""
+open.BorderSizePixel = 0
+open.Parent = gui
+corner(open, UDim.new(1, 0))
+local inner = Instance.new("Frame")
+inner.Size = UDim2.fromOffset(34, 34)
+inner.Position = UDim2.new(0.5, -17, 0.5, -17)
+inner.BackgroundColor3 = Color3.fromRGB(70, 75, 82)
+inner.BorderSizePixel = 0
+inner.Parent = open
+corner(inner, UDim.new(1, 0))
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(88, 94, 102)
+stroke.Thickness = 3
+stroke.Parent = open
+
+local panel = Instance.new("Frame")
+panel.Size = UDim2.fromOffset(250, 158)
+panel.Position = UDim2.new(0, 30, 0.5, -79)
+panel.BackgroundColor3 = Color3.fromRGB(38, 42, 48)
+panel.BorderSizePixel = 0
+panel.Parent = gui
+corner(panel, UDim.new(0, 12))
+
+local hide = Instance.new("TextButton")
+hide.Size = UDim2.fromOffset(16, 4)
+hide.Position = UDim2.new(1, -26, 0, 10)
+hide.BackgroundColor3 = Color3.new(1, 1, 1)
+hide.Text = ""
+hide.BorderSizePixel = 0
+hide.Parent = panel
+corner(hide, UDim.new(1, 0))
+
+label(panel, "Auto farm", 16, 24, 100, 16)
+local track = Instance.new("TextButton")
+track.Size = UDim2.fromOffset(48, 24)
+track.Position = UDim2.fromOffset(150, 24)
+track.BackgroundColor3 = Color3.new(1, 1, 1)
+track.Text = ""
+track.BorderSizePixel = 0
+track.AutoButtonColor = false
+track.Parent = panel
+corner(track, UDim.new(1, 0))
+local knob = Instance.new("Frame")
+knob.Size = UDim2.fromOffset(20, 20)
+knob.Position = UDim2.fromOffset(2, 2)
+knob.BackgroundColor3 = Color3.fromRGB(205, 208, 214)
+knob.BorderSizePixel = 0
+knob.Parent = track
+corner(knob, UDim.new(1, 0))
+
+label(panel, "speed", 16, 62, 70, 15)
+local box = Instance.new("TextBox")
+box.Size = UDim2.fromOffset(68, 24)
+box.Position = UDim2.fromOffset(150, 60)
+box.BackgroundColor3 = Color3.new(1, 1, 1)
+box.PlaceholderText = "0-600"
+box.TextColor3 = Color3.fromRGB(25, 28, 32)
+box.Font = Enum.Font.GothamBold
+box.TextSize = 14
+box.ClearTextOnFocus = false
+box.Text = "30"
+box.Parent = panel
+corner(box, UDim.new(0, 6))
+
+local slider = Instance.new("TextButton")
+slider.Size = UDim2.fromOffset(218, 14)
+slider.Position = UDim2.fromOffset(16, 94)
+slider.BackgroundColor3 = Color3.new(1, 1, 1)
+slider.Text = ""
+slider.BorderSizePixel = 0
+slider.AutoButtonColor = false
+slider.Parent = panel
+corner(slider, UDim.new(1, 0))
+local fill = Instance.new("Frame")
+fill.Size = UDim2.fromScale(0, 1)
+fill.BackgroundColor3 = Color3.fromRGB(90, 165, 255)
+fill.BorderSizePixel = 0
+fill.Parent = slider
+corner(fill, UDim.new(1, 0))
+
+local credit = label(panel, "made by Orionhub", 0, 136, 250, 10, Enum.Font.Gotham)
+credit.TextXAlignment = Enum.TextXAlignment.Center
+
+local setSpeed = function(v: number)
+	state.speed = math.clamp(math.floor(v + 0.5), 0, 600)
+	box.Text = tostring(state.speed)
+	fill.Size = UDim2.fromScale(state.speed / 600, 1)
+end
+local setToggle = function()
+	if auto then
+		knob.Position = UDim2.fromOffset(26, 2)
+		knob.BackgroundColor3 = Color3.new(1, 1, 1)
+		track.BackgroundColor3 = Color3.fromRGB(90, 165, 255)
+	else
+		knob.Position = UDim2.fromOffset(2, 2)
+		knob.BackgroundColor3 = Color3.fromRGB(205, 208, 214)
+		track.BackgroundColor3 = Color3.new(1, 1, 1)
+	end
+end
+local drag = false
+local function slide(input: InputObject)
+	local w = math.max(slider.AbsoluteSize.X, 1)
+	setSpeed(math.clamp((input.Position.X - slider.AbsolutePosition.X) / w, 0, 1) * 600)
+end
+slider.InputBegan:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+		drag = true
+		slide(i)
+	end
+end)
+slider.InputEnded:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then drag = false end
+end)
+UserInputService.InputChanged:Connect(function(i)
+	if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then slide(i) end
+end)
+box.FocusLost:Connect(function(enter)
+	setSpeed(tonumber(box.Text) or state.speed)
+	if enter then box:ReleaseFocus() end
+end)
+
+track.MouseButton1Click:Connect(function()
+	auto = not auto
+	setToggle()
+	if not auto then
+		setFlying(false)
+		return
+	end
+	if not state.noclip then setNoclip(true) end
+	setFlying(true)
+	task.spawn(function()
+		while auto do
+			if #sorted == 0 then
+				task.wait(0.25)
+			else
+				goStep(1)
+				while flying and auto do task.wait(0.05) end
+				if auto then task.wait(state.delay) end
+			end
+		end
+	end)
+end)
+hide.MouseButton1Click:Connect(function() panel.Visible = false end)
+open.MouseButton1Click:Connect(function()
+	panel.Visible = not panel.Visible
+	if panel.Visible then
+		scan()
+		refresh()
+	end
+end)
+
+task.spawn(function()
+	while gui.Parent do
+		RunService.Heartbeat:Wait()
+		if auto and not flying then
+			local r = root()
+			if r then
+				local h = humanoid()
+				if h then h:ChangeState(Enum.HumanoidStateType.Physics) end
+				r.AssemblyLinearVelocity = Vector3.zero
+				r.AssemblyAngularVelocity = Vector3.zero
+				if hold and (r.Position - hold).Magnitude > 0.25 then
+					local yaw = select(2, r.CFrame:ToEulerAnglesYXZ())
+					r.CFrame = CFrame.new(hold) * CFrame.Angles(0, yaw, 0)
+				end
+			end
+		end
+	end
+end)
+task.spawn(function()
+	while gui.Parent do
+		task.wait(0.5)
+		if dirty then refresh() end
+		if state.noclip then
+			setCollide(false)
+			floorGuard()
+		end
+	end
+end)
+task.spawn(function()
+	while gui.Parent do
+		RunService.Heartbeat:Wait()
+		if state.noclip and not flying then floorGuard() end
+	end
+end)
+
+player.CharacterAdded:Connect(function()
+	token += 1
+	flights = 0
+	flying = false
+	setFlying(false)
+	table.clear(collide)
+	safeY, hold = nil, nil
+	task.wait(0.5)
+	if state.noclip then
+		local r = root()
+		safeY = r and r.Position.Y or nil
+		setCollide(false)
+	end
+	if auto then
+		if not state.noclip then setNoclip(true) end
+		setFlying(true)
+	end
+	scan()
+	refresh()
+end)
+
+setSpeed(state.speed)
+scan()
+refresh()
