@@ -10,7 +10,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local MESH_ID = 139025296710661
 local HEIGHT = 2.1
-local state = {speed = 30, delay = 0.1, noclip = false}
+local state = {speed = 30, delay = 1.5, noclip = false}
 
 local function root(): BasePart?
 	local c = player.Character
@@ -42,8 +42,11 @@ end
 
 local token, flying, flights = 0, false, 0
 local collide: {[BasePart]: boolean} = {}
+local farm = false
+local parked = false
 local hold: Vector3? = nil
-local safeY: number? = nil
+local safe: CFrame? = nil
+local waitSpot = CFrame.new(100000, 0, 100000)
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.IgnoreWater = true
@@ -72,9 +75,9 @@ local function floorGuard()
 	if hold and math.abs(r.Position.Y - hold.Y) <= 1.5 then return end
 	rayParams.FilterDescendantsInstances = {c}
 	local hit = workspace:Raycast(r.Position + Vector3.new(0, 3, 0), Vector3.new(0, -600, 0), rayParams)
-	local limit = hit and hit.Position.Y + 3 or safeY
+	local limit = hit and hit.Position.Y + 3 or safe and safe.Position.Y
 	if limit then
-		safeY = limit
+		if hit then safe = CFrame.new(r.Position.X, limit, r.Position.Z) end
 		if r.Position.Y < limit then
 			r.AssemblyLinearVelocity = Vector3.new(r.AssemblyLinearVelocity.X, 0, r.AssemblyLinearVelocity.Z)
 			r.CFrame += Vector3.new(0, limit - r.Position.Y, 0)
@@ -85,7 +88,7 @@ local function setNoclip(on: boolean)
 	state.noclip = on
 	if on then
 		local r = root()
-		safeY = r and r.Position.Y or nil
+		safe = r and r.CFrame or nil
 		setCollide(false)
 		floorGuard()
 		if not flying then setFlying(false) end
@@ -185,13 +188,13 @@ local goToIndex: (number) -> () = function(n)
 	current, index = p, n
 	local r = root()
 	if r then task.spawn(function()
-		fly(r, goal(p))
-		if current == p then
-			for i = 1, #sorted do
-				if sorted[i] == p then index = i break end
+			fly(r, goal(p))
+			if current == p then
+				for i = 1, #sorted do
+					if sorted[i] == p then index = i break end
+				end
 			end
-		end
-	end) end
+		end) end
 end
 local goStep = function(step: number)
 	if #sorted == 0 then return end
@@ -365,16 +368,29 @@ track.MouseButton1Click:Connect(function()
 	auto = not auto
 	setToggle()
 	if not auto then
+		farm = false
+		parked = false
 		setFlying(false)
 		return
 	end
 	if not state.noclip then setNoclip(true) end
 	setFlying(true)
+	farm = true
 	task.spawn(function()
 		while auto do
 			if #sorted == 0 then
-				task.wait(0.25)
+				if not parked then
+					parked = true
+					local r = root()
+					if r then
+						hold = waitSpot.Position
+						r.CFrame = waitSpot
+					end
+				end
+				if dirty then refresh() end
+				task.wait(0.1)
 			else
+				parked = false
 				goStep(1)
 				while flying and auto do task.wait(0.05) end
 				if auto then task.wait(state.delay) end
@@ -394,14 +410,14 @@ end)
 task.spawn(function()
 	while gui.Parent do
 		RunService.Heartbeat:Wait()
-		if auto and not flying then
+		if (auto or farm) and not flying then
 			local r = root()
 			if r then
 				local h = humanoid()
 				if h then h:ChangeState(Enum.HumanoidStateType.Physics) end
 				r.AssemblyLinearVelocity = Vector3.zero
 				r.AssemblyAngularVelocity = Vector3.zero
-				if hold and (r.Position - hold).Magnitude > 0.25 then
+				if hold then
 					local yaw = select(2, r.CFrame:ToEulerAnglesYXZ())
 					r.CFrame = CFrame.new(hold) * CFrame.Angles(0, yaw, 0)
 				end
@@ -432,16 +448,17 @@ player.CharacterAdded:Connect(function()
 	flying = false
 	setFlying(false)
 	table.clear(collide)
-	safeY, hold = nil, nil
+	safe, hold, parked, farm = nil, nil, false, false
 	task.wait(0.5)
 	if state.noclip then
 		local r = root()
-		safeY = r and r.Position.Y or nil
+		safe = r and r.CFrame or nil
 		setCollide(false)
 	end
 	if auto then
 		if not state.noclip then setNoclip(true) end
 		setFlying(true)
+		farm = true
 	end
 	scan()
 	refresh()
