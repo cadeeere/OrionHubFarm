@@ -3,15 +3,12 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 if not RunService:IsClient() then return end
-
 local player = Players.LocalPlayer
 while not player do task.wait(); player = Players.LocalPlayer end
 local playerGui = player:WaitForChild("PlayerGui")
-
 local MESH_ID = 139025296710661
 local HEIGHT = 2.1
-local state = {speed = 30, delay = 0, noclip = false}
-
+local state = {speed = 30, delay = 1.5, autoReset = true, autoPark = true, noclip = false}
 local function root(): BasePart?
 	local c = player.Character
 	return c and (c:FindFirstChild("HumanoidRootPart") :: BasePart? or c.PrimaryPart)
@@ -24,33 +21,70 @@ local function setFlying(on: boolean)
 	local h = humanoid()
 	if h then h:ChangeState(on and Enum.HumanoidStateType.Physics or Enum.HumanoidStateType.GettingUp) end
 end
-
 local function meshId(inst: Instance): number?
 	local raw = (inst :: any).MeshId
 	if typeof(raw) ~= "string" or raw == "" then raw = tostring((inst :: any).MeshContent) end
 	local d = typeof(raw) == "string" and string.match(raw, "(%d+)") or nil
 	return d and tonumber(d) or nil
 end
+local function isVisible(part: BasePart, mesh: Instance?): boolean
+	if not part.Parent then return false end
+	if not part:IsA("BasePart") then return false end
+	if part.Size.Magnitude <= 0.01 then return false end
+	local alpha = part.Transparency
+	local localModifier = (part :: any).LocalTransparencyModifier
+	if typeof(localModifier) == "number" then alpha += localModifier end
+	if alpha >= 0.99 then return false end
+	local pos = part.Position
+	if pos.X ~= pos.X or pos.Y ~= pos.Y or pos.Z ~= pos.Z then return false end
+	for _, c in ipairs(part:GetChildren()) do
+		if c:IsA("Decal") or c:IsA("Texture") then
+			local t = (c :: any).Transparency
+			if typeof(t) == "number" and t >= 0.99 then return false end
+		end
+	end
+	local function aVisible(inst: Instance): boolean
+		return inst:IsA("BasePart")
+			and not (inst :: any).Locked
+			and ((inst :: any).Transparency or 0) < 0.99
+	end
+	local parent = part.Parent
+	while parent and parent ~= workspace do
+		if parent:IsA("Model") then
+			local world = (parent :: any).WorldPivot
+			if world.Position.Magnitude > 10000 then return false end
+		end
+		if parent:IsA("BasePart") and not aVisible(parent) then return false end
+		parent = parent.Parent
+	end
+	if mesh and mesh:IsA("SpecialMesh") then
+		local scale = (mesh :: any).Scale
+		if typeof(scale) == "Vector3" and scale.Magnitude <= 0.01 then return false end
+	end
+	return true
+end
 local function targetOf(inst: Instance): BasePart?
-	if inst:IsA("MeshPart") and meshId(inst) == MESH_ID then return inst end
+	if inst:IsA("MeshPart") and meshId(inst) == MESH_ID then
+		if isVisible(inst, nil) then return inst end
+		return nil
+	end
 	if inst:IsA("SpecialMesh") and meshId(inst) == MESH_ID then
 		local p = inst.Parent
-		if p and p:IsA("BasePart") then return p end
+		if p and p:IsA("BasePart") and isVisible(p, inst) then return p end
 	end
 	return nil
 end
-
 local token, flying, flights = 0, false, 0
 local collide: {[BasePart]: boolean} = {}
-local farm = false
 local parked = false
+local lastCoin = os.clock()
+local resetDone = false
 local hold: Vector3? = nil
 local safe: CFrame? = nil
 local waitSpot = CFrame.new(100000, 0, 100000)
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.IgnoreWater = true
-
 local function setCollide(on: boolean)
 	local c = player.Character
 	if not c then table.clear(collide) return end
@@ -94,11 +128,10 @@ local function setNoclip(on: boolean)
 		if not flying then setFlying(false) end
 	else setCollide(true) end
 end
-
 local function goal(part: BasePart): Vector3
 	return part.Position - Vector3.new(0, part.Size.Y * 0.5 + HEIGHT, 0)
 end
-local function fly(r: BasePart, to: Vector3)
+local function fly(r: BasePart, to: Vector3, part: BasePart?)
 	local yaw = select(2, r.CFrame:ToEulerAnglesYXZ())
 	local place = function(p: Vector3)
 		r.AssemblyLinearVelocity = Vector3.zero
@@ -119,6 +152,7 @@ local function fly(r: BasePart, to: Vector3)
 	setFlying(true)
 	setCollide(false)
 	while my == token and r.Parent do
+		if part and not isVisible(part, nil) then break end
 		local dt = RunService.Heartbeat:Wait()
 		local d = to - pos
 		local dist = d.Magnitude
@@ -139,7 +173,6 @@ local function fly(r: BasePart, to: Vector3)
 		if not state.noclip then setCollide(true) end
 	end
 end
-
 local targets: {BasePart} = {}
 local set: {[BasePart]: boolean} = {}
 local sorted: {BasePart} = {}
@@ -175,34 +208,37 @@ local function refresh()
 	local r = root()
 	local o = r and r.Position or Vector3.zero
 	table.sort(sorted, function(a, b) return (a.Position - o).Magnitude < (b.Position - o).Magnitude end)
-	if current and set[current] then
-		for i = 1, #sorted do
-			if sorted[i] == current then index = i break end
-		end
-	else current, index = nil, 0 end
+	if not current or not set[current] then current, index = nil, 0 end
 end
 local goToIndex: (number) -> () = function(n)
 	if n < 1 or n > #sorted then return end
 	local p = sorted[n]
-	if not p or not p.Parent then dirty = true return end
+	if not p or not p.Parent or not isVisible(p, nil) then dirty = true return end
 	current, index = p, n
 	local r = root()
 	if r then task.spawn(function()
-			fly(r, goal(p))
-			if current == p then
-				for i = 1, #sorted do
-					if sorted[i] == p then index = i break end
-				end
+		fly(r, goal(p), p)
+		if current == p then
+			for i = 1, #sorted do
+				if sorted[i] == p then index = i break end
 			end
-		end) end
+		end
+	end) end
 end
-local goStep = function(step: number)
+local function nearest()
 	if #sorted == 0 then return end
-	local n = (index > 0 and index <= #sorted and index or 0) + step
-	if n > #sorted then n = 1 elseif n < 1 then n = #sorted end
-	goToIndex(n)
+	local r = root()
+	local o = r and r.Position or Vector3.zero
+	local best, bestDist = nil, math.huge
+	for i = 1, #sorted do
+		local p = sorted[i]
+		if p.Parent and isVisible(p, nil) then
+			local d = (p.Position - o).Magnitude
+			if d < bestDist then best, bestDist = i, d end
+		end
+	end
+	if best then goToIndex(best) end
 end
-
 workspace.DescendantAdded:Connect(function(i)
 	local p = targetOf(i)
 	if p and add(p) then dirty = true end
@@ -211,13 +247,11 @@ workspace.DescendantRemoving:Connect(function(i)
 	local p = targetOf(i)
 	if p and remove(p) then dirty = true end
 end)
-
 local gui = Instance.new("ScreenGui")
 gui.Name = "MeshTeleportGui"
 gui.ResetOnSpawn = false
 gui.DisplayOrder = 100
 gui.Parent = playerGui
-
 local function corner(parent: Instance, r: UDim)
 	local c = Instance.new("UICorner")
 	c.CornerRadius = r
@@ -237,7 +271,6 @@ local function label(parent: Instance, text: string, x: number, y: number, w: nu
 	l.Parent = parent
 	return l
 end
-
 local open = Instance.new("TextButton")
 open.Size = UDim2.fromOffset(64, 64)
 open.Position = UDim2.new(1, -100, 0.5, -32)
@@ -257,7 +290,6 @@ local stroke = Instance.new("UIStroke")
 stroke.Color = Color3.fromRGB(88, 94, 102)
 stroke.Thickness = 3
 stroke.Parent = open
-
 local panel = Instance.new("Frame")
 panel.Size = UDim2.fromOffset(250, 158)
 panel.Position = UDim2.new(0, 30, 0.5, -79)
@@ -265,7 +297,6 @@ panel.BackgroundColor3 = Color3.fromRGB(38, 42, 48)
 panel.BorderSizePixel = 0
 panel.Parent = gui
 corner(panel, UDim.new(0, 12))
-
 local hide = Instance.new("TextButton")
 hide.Size = UDim2.fromOffset(16, 4)
 hide.Position = UDim2.new(1, -26, 0, 10)
@@ -274,7 +305,6 @@ hide.Text = ""
 hide.BorderSizePixel = 0
 hide.Parent = panel
 corner(hide, UDim.new(1, 0))
-
 label(panel, "Auto farm", 16, 24, 100, 16)
 local track = Instance.new("TextButton")
 track.Size = UDim2.fromOffset(48, 24)
@@ -292,7 +322,6 @@ knob.BackgroundColor3 = Color3.fromRGB(205, 208, 214)
 knob.BorderSizePixel = 0
 knob.Parent = track
 corner(knob, UDim.new(1, 0))
-
 label(panel, "speed", 16, 62, 70, 15)
 local box = Instance.new("TextBox")
 box.Size = UDim2.fromOffset(68, 24)
@@ -306,7 +335,6 @@ box.ClearTextOnFocus = false
 box.Text = "30"
 box.Parent = panel
 corner(box, UDim.new(0, 6))
-
 local slider = Instance.new("TextButton")
 slider.Size = UDim2.fromOffset(218, 14)
 slider.Position = UDim2.fromOffset(16, 94)
@@ -322,14 +350,73 @@ fill.BackgroundColor3 = Color3.fromRGB(90, 165, 255)
 fill.BorderSizePixel = 0
 fill.Parent = slider
 corner(fill, UDim.new(1, 0))
-
-local credit = label(panel, "made by Orionhub", 0, 136, 250, 10, Enum.Font.Gotham)
+label(panel, "Auto reset", 16, 118, 100, 15)
+label(panel, "Auto TP", 16, 146, 100, 15)
+local resetTrack = Instance.new("TextButton")
+resetTrack.Size = UDim2.fromOffset(48, 24)
+resetTrack.Position = UDim2.fromOffset(150, 116)
+resetTrack.BackgroundColor3 = Color3.fromRGB(90, 165, 255)
+resetTrack.Text = ""
+resetTrack.BorderSizePixel = 0
+resetTrack.AutoButtonColor = false
+resetTrack.Parent = panel
+corner(resetTrack, UDim.new(1, 0))
+local resetKnob = Instance.new("Frame")
+resetKnob.Size = UDim2.fromOffset(20, 20)
+resetKnob.Position = UDim2.fromOffset(26, 2)
+resetKnob.BackgroundColor3 = Color3.new(1, 1, 1)
+resetKnob.BorderSizePixel = 0
+resetKnob.Parent = resetTrack
+corner(resetKnob, UDim.new(1, 0))
+local parkTrack = Instance.new("TextButton")
+parkTrack.Size = UDim2.fromOffset(48, 24)
+parkTrack.Position = UDim2.fromOffset(150, 144)
+parkTrack.BackgroundColor3 = Color3.fromRGB(90, 165, 255)
+parkTrack.Text = ""
+parkTrack.BorderSizePixel = 0
+parkTrack.AutoButtonColor = false
+parkTrack.Parent = panel
+corner(parkTrack, UDim.new(1, 0))
+local parkKnob = Instance.new("Frame")
+parkKnob.Size = UDim2.fromOffset(20, 20)
+parkKnob.Position = UDim2.fromOffset(26, 2)
+parkKnob.BackgroundColor3 = Color3.new(1, 1, 1)
+parkKnob.BorderSizePixel = 0
+parkKnob.Parent = parkTrack
+corner(parkKnob, UDim.new(1, 0))
+local setParkToggle = function()
+	if state.autoPark then
+		parkKnob.Position = UDim2.fromOffset(26, 2)
+		parkKnob.BackgroundColor3 = Color3.new(1, 1, 1)
+		parkTrack.BackgroundColor3 = Color3.fromRGB(90, 165, 255)
+	else
+		parkKnob.Position = UDim2.fromOffset(2, 2)
+		parkKnob.BackgroundColor3 = Color3.fromRGB(205, 208, 214)
+		parkTrack.BackgroundColor3 = Color3.new(1, 1, 1)
+	end
+end
+parkTrack.MouseButton1Click:Connect(function()
+	state.autoPark = not state.autoPark
+	setParkToggle()
+end)
+panel.Size = UDim2.fromOffset(250, 200)
+local credit = label(panel, "made by Orionhub", 0, 178, 250, 10, Enum.Font.Gotham)
 credit.TextXAlignment = Enum.TextXAlignment.Center
-
 local setSpeed = function(v: number)
 	state.speed = math.clamp(math.floor(v + 0.5), 0, 600)
 	box.Text = tostring(state.speed)
 	fill.Size = UDim2.fromScale(state.speed / 600, 1)
+end
+local setResetToggle = function()
+	if state.autoReset then
+		resetKnob.Position = UDim2.fromOffset(26, 2)
+		resetKnob.BackgroundColor3 = Color3.new(1, 1, 1)
+		resetTrack.BackgroundColor3 = Color3.fromRGB(90, 165, 255)
+	else
+		resetKnob.Position = UDim2.fromOffset(2, 2)
+		resetKnob.BackgroundColor3 = Color3.fromRGB(205, 208, 214)
+		resetTrack.BackgroundColor3 = Color3.new(1, 1, 1)
+	end
 end
 local setToggle = function()
 	if auto then
@@ -363,7 +450,12 @@ box.FocusLost:Connect(function(enter)
 	setSpeed(tonumber(box.Text) or state.speed)
 	if enter then box:ReleaseFocus() end
 end)
-
+resetTrack.MouseButton1Click:Connect(function()
+	state.autoReset = not state.autoReset
+	lastCoin = os.clock()
+	resetDone = false
+	setResetToggle()
+end)
 track.MouseButton1Click:Connect(function()
 	auto = not auto
 	setToggle()
@@ -379,7 +471,13 @@ track.MouseButton1Click:Connect(function()
 	task.spawn(function()
 		while auto do
 			if #sorted == 0 then
-				if not parked then
+				if state.autoReset and not resetDone then
+					resetDone = true
+					local h = humanoid()
+					if h then h.Health = 0 end
+					task.wait(3)
+				end
+				if state.autoPark and not parked then
 					parked = true
 					local r = root()
 					if r then
@@ -390,15 +488,15 @@ track.MouseButton1Click:Connect(function()
 				if dirty then refresh() end
 				task.wait(0.1)
 			else
+				resetDone = false
 				parked = false
-				goStep(1)
-				while flying and auto do task.wait(0.05) end
+				nearest()
+				if current then lastCoin = os.clock() end
 				if auto then task.wait(state.delay) end
 			end
 		end
 	end)
 end)
-hide.MouseButton1Click:Connect(function() panel.Visible = false end)
 open.MouseButton1Click:Connect(function()
 	panel.Visible = not panel.Visible
 	if panel.Visible then
@@ -406,7 +504,6 @@ open.MouseButton1Click:Connect(function()
 		refresh()
 	end
 end)
-
 task.spawn(function()
 	while gui.Parent do
 		RunService.Heartbeat:Wait()
@@ -441,7 +538,6 @@ task.spawn(function()
 		if state.noclip and not flying then floorGuard() end
 	end
 end)
-
 player.CharacterAdded:Connect(function()
 	token += 1
 	flights = 0
@@ -463,7 +559,6 @@ player.CharacterAdded:Connect(function()
 	scan()
 	refresh()
 end)
-
 setSpeed(state.speed)
 scan()
 refresh()
