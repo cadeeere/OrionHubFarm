@@ -10,7 +10,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local MESH_ID = 139025296710661
 local HEIGHT = 2.1
-local state = {speed = 30, delay = 1.5, noclip = false}
+local state = {speed = 30, delay = 0, noclip = false}
 
 local function root(): BasePart?
 	local c = player.Character
